@@ -1,92 +1,88 @@
-import os
-import json
-import base64
-import asyncio
+import os, json, base64
+import edge_tts, httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Optional
-import edge_tts
 from google import genai
 from google.genai import types
 
-app = FastAPI(title="GyaanLens AI Engine")
+app = FastAPI()
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+VOICE = os.getenv("VOICE", "hi-IN-SwaraNeural")
+DID = os.getenv("DID_API_KEY")          # optional: real teacher video
+TEACHER = os.getenv("TEACHER_IMAGE_URL")  # optional: teacher photo URL (apni/licensed)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+SYSTEM = """तुम एक अनुभवी भारतीय शिक्षक हो। छात्र का प्रश्न (पाठ या फोटो) चरण-दर-चरण समझाओ।
+केवल JSON लौटाओ: {"title":str,"scenes":[{"heading":str,"say":str,"lines":[str],"formula":str}]}
+नियम: 4 से 7 दृश्य। "say" बोला जाने वाला शुद्ध हिंदी पाठ है: छोटे वाक्य, उर्दू/फ़ारसी/अरबी शब्द नहीं,
+नुक्ते वाले अक्षर नहीं, कोई markdown या चिह्न नहीं। "lines" में अधिकतम 3 छोटे बोर्ड-बिंदु।
+"formula" में सरल पाठ-सूत्र (जैसे v = u + at), न हो तो खाली। अंतिम दृश्य में उत्तर और सार दो।
+फोटो हो तो पहले प्रश्न पढ़ो, फिर हल करो।"""
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+class Ask(BaseModel):
+    text: str = ""
+    image_b64: str | None = None
+    mime: str = "image/jpeg"
 
-class SolveRequest(BaseModel):
-    prompt: Optional[str] = ""
-    image_base64: Optional[str] = None
-    voice_name: str = "hi-IN-MadhurNeural" # Ya "hi-IN-SwaraNeural"
+class Say(BaseModel):
+    text: str
 
-async def text_to_speech_base64(text: str, voice: str) -> str:
-    communicate = edge_tts.Communicate(text, voice, rate="+2%", pitch="+0Hz")
-    audio = b""
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio += chunk["data"]
-    return base64.b64encode(audio).decode("utf-8")
-
-@app.post("/api/solve")
-async def solve(req: SolveRequest):
-    if not ai_client:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
-
-    system_instruction = """
-    Aap ek adhyapak hain jo prashnon ko step-by-step whiteboard video roop me samjhate hain.
-    Nirdesh:
-    1. Bhasha: Shuddh Hindi (Devanagari). Urdu ya Persian shabdon se bachein (prashn, uttar, sutra, charan).
-    2. Ganit ke sanketon ko bolne ke liye shabdon me likhein (= ko barabar, + ko jama).
-    3. Output KEWAL valid JSON hona chahiye:
-    {
-      "scenes": [
-        {
-          "title": "Charan ka shirshak",
-          "board": ["Board par likhi jane wali 2-3 lines", "Sutra ya sankhya"],
-          "say": "Adhyapak dwara bola jane wala shuddh aur aakarshak vakya.",
-          "emoji": "✏️",
-          "svg": "<svg viewBox='0 0 300 160' xmlns='http://www.w3.org/2000/svg'><polygon points='50,130 220,130 50,40' fill='none' stroke='#ffd36b' stroke-width='3'/></svg>"
-        }
-      ]
-    }
-    """
-
-    contents = []
-    if req.image_base64:
-        image_bytes = base64.b64decode(req.image_base64.split(",")[-1])
-        contents.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
-    
-    user_text = req.prompt if req.prompt else "Is tasveer me diye gaye prashn ko hal karein aur board par samjhayein."
-    contents.append(user_text)
-
+@app.post("/api/lesson")
+async def lesson(a: Ask):
+    parts = []
+    if a.image_b64:
+        parts.append(types.Part.from_bytes(data=base64.b64decode(a.image_b64), mime_type=a.mime))
+    parts.append(a.text or "इस फोटो का प्रश्न हल करके समझाओ।")
     try:
-        response = ai_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json"
-            )
-        )
-        data = json.loads(response.text)
-        scenes = data.get("scenes", [])
-
-        # Har scene ke liye Indian Neural Voice banana
-        for scene in scenes:
-            scene["audio_base64"] = await text_to_speech_base64(scene["say"], req.voice_name)
-
-        return {"status": "success", "scenes": scenes}
+        r = await client.aio.models.generate_content(
+            model=MODEL, contents=parts,
+            config=types.GenerateContentConfig(system_instruction=SYSTEM,
+                response_mime_type="application/json", temperature=0.4))
+        return json.loads(r.text)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(502, f"AI error: {str(e)[:200]}")
 
-@app.get("/")
-def ping():
-    return {"status": "GyaanLens Engine Live"}
+cache = {}
+@app.post("/api/tts")
+async def tts(s: Say):
+    if s.text in cache:
+        return Response(cache[s.text], media_type="audio/mpeg")
+    buf = bytearray()
+    async for c in edge_tts.Communicate(s.text, VOICE, rate="-8%").stream():
+        if c["type"] == "audio":
+            buf += c["data"]
+    if not buf:
+        raise HTTPException(502, "voice nahi bani")
+    if len(cache) > 200:
+        cache.clear()
+    cache[s.text] = bytes(buf)
+    return Response(cache[s.text], media_type="audio/mpeg")
+
+@app.get("/api/config")
+def config():
+    return {"avatar": bool(DID and TEACHER)}
+
+# --- Optional real-teacher video (D-ID). Endpoint/fields D-ID docs se ek bar verify kar lena ---
+@app.post("/api/avatar")
+async def avatar(s: Say):
+    if not (DID and TEACHER):
+        raise HTTPException(404, "avatar off")
+    async with httpx.AsyncClient(timeout=30) as h:
+        r = await h.post("https://api.d-id.com/talks",
+            headers={"Authorization": f"Basic {DID}"},
+            json={"source_url": TEACHER, "script": {"type": "text", "input": s.text,
+                  "provider": {"type": "microsoft", "voice_id": VOICE}}})
+    if r.status_code >= 300:
+        raise HTTPException(502, r.text[:200])
+    return {"id": r.json()["id"]}
+
+@app.get("/api/avatar/{tid}")
+async def avatar_status(tid: str):
+    async with httpx.AsyncClient(timeout=30) as h:
+        r = await h.get(f"https://api.d-id.com/talks/{tid}", headers={"Authorization": f"Basic {DID}"})
+    j = r.json()
+    return {"status": j.get("status"), "url": j.get("result_url")}
+
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
