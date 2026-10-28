@@ -1,7 +1,6 @@
 import os, json, base64
 import edge_tts, httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -9,19 +8,25 @@ from google import genai
 from google.genai import types
 
 app = FastAPI()
+from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 VOICE = os.getenv("VOICE", "hi-IN-SwaraNeural")
-DID = os.getenv("DID_API_KEY")
-TEACHER = os.getenv("TEACHER_IMAGE_URL")
+DID = os.getenv("DID_API_KEY")          # optional: real teacher video
+TEACHER = os.getenv("TEACHER_IMAGE_URL")  # optional: teacher photo URL (apni/licensed)
 
-SYSTEM = """तुम एक अनुभवी भारतीय शिक्षक हो। छात्र का प्रश्न (पाठ या फोटो) चरण-दर-चरण समझाओ।
-केवल JSON लौटाओ: {"title":str,"scenes":[{"heading":str,"say":str,"lines":[str],"formula":str}]}
-नियम: 4 से 7 दृश्य। "say" बोला जाने वाला शुद्ध हिंदी पाठ है: छोटे वाक्य, उर्दू/फ़ारसी/अरबी शब्द नहीं,
-नुक्ते वाले अक्षर नहीं, कोई markdown या चिह्न नहीं। "lines" में अधिकतम 3 छोटे बोर्ड-बिंदु।
-"formula" में सरल पाठ-सूत्र (जैसे v = u + at), न हो तो खाली। अंतिम दृश्य में उत्तर और सार दो।
-फोटो हो तो पहले प्रश्न पढ़ो, फिर हल करो।"""
+SYSTEM = """तुम एक स्नेही और धैर्यवान भारतीय कक्षा-शिक्षक हो। बच्चों को सामने बैठाकर बोर्ड पर लिखते हुए, धीरे-धीरे, एक-एक बात करके समझाओ। छात्र का प्रश्न (पाठ या फोटो) लो।
+केवल JSON लौटाओ: {"title":str,"scenes":[{"heading":str,"say":str,"write":[str],"formula":str,"pause":int}]}
+नियम:
+- 8 से 14 दृश्य। हर दृश्य में केवल एक ही बात या एक ही चरण समझाओ।
+- "say": 4 से 6 छोटे वाक्य, शिक्षक की बोलचाल की शुद्ध हिंदी। पहले बात बताओ, फिर कारण, फिर रोज के जीवन का एक उदाहरण। बीच-बीच में बच्चे से पूछो (जैसे "क्या आप समझ गए?", "जरा सोचिए...") और जरूरी बात दोहराओ। उर्दू, फारसी, अरबी शब्द और नुक्ते वाले अक्षर नहीं। कोई markdown या चिह्न नहीं।
+- "heading": केवल नए भाग की शुरुआत में शीर्षक दो (इससे बोर्ड साफ होगा), बाकी दृश्यों में खाली "" रखो।
+- "write": इसी दृश्य में बोर्ड पर लिखने के 1 या 2 बहुत छोटे बिंदु।
+- "formula": सरल पाठ-सूत्र (जैसे v = u + at), न हो तो खाली।
+- "pause": बच्चे के सोचने के लिए रुकने के सेकंड (0 से 6); प्रश्न पूछने वाले दृश्य में 4 से 6।
+- पहला दृश्य: नमस्ते और आज क्या सीखेंगे। अंतिम दृश्य: सार और अंतिम उत्तर।
+- फोटो हो तो पहले प्रश्न पढ़कर सुनाओ, फिर हल करो।"""
 
 class Ask(BaseModel):
     text: str = ""
@@ -52,7 +57,7 @@ async def tts(s: Say):
     if s.text in cache:
         return Response(cache[s.text], media_type="audio/mpeg")
     buf = bytearray()
-    async for c in edge_tts.Communicate(s.text, VOICE, rate="-8%").stream():
+    async for c in edge_tts.Communicate(s.text, VOICE, rate="-18%").stream():
         if c["type"] == "audio":
             buf += c["data"]
     if not buf:
@@ -67,6 +72,7 @@ def config():
     local = os.path.exists("static/teacher.jpg")
     return {"avatar": bool(DID and TEACHER), "teacher": TEACHER or ("/teacher.jpg" if local else None)}
 
+# --- Optional real-teacher video (D-ID). Endpoint/fields D-ID docs se ek bar verify kar lena ---
 @app.post("/api/avatar")
 async def avatar(s: Say):
     if not (DID and TEACHER):
@@ -87,5 +93,4 @@ async def avatar_status(tid: str):
     j = r.json()
     return {"status": j.get("status"), "url": j.get("result_url")}
 
-os.makedirs("static", exist_ok=True)
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
