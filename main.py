@@ -5,11 +5,12 @@ import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 import edge_tts
 from google import genai
 from google.genai import types
 
-app = FastAPI(title="GyaanLens Visual Engine")
+app = FastAPI(title="GyaanLens AI Engine")
 
 app.add_middleware(
     CORSMiddleware,
@@ -22,63 +23,70 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 class SolveRequest(BaseModel):
-    prompt: str
-    voice_name: str = "hi-IN-MadhurNeural"
+    prompt: Optional[str] = ""
+    image_base64: Optional[str] = None
+    voice_name: str = "hi-IN-MadhurNeural" # Ya "hi-IN-SwaraNeural"
 
-async def generate_audio_base64(text: str, voice: str) -> str:
+async def text_to_speech_base64(text: str, voice: str) -> str:
     communicate = edge_tts.Communicate(text, voice, rate="+2%", pitch="+0Hz")
-    audio_data = b""
+    audio = b""
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
-            audio_data += chunk["data"]
-    return base64.b64encode(audio_data).decode("utf-8")
+            audio += chunk["data"]
+    return base64.b64encode(audio).decode("utf-8")
 
 @app.post("/api/solve")
-async def solve_question(req: SolveRequest):
+async def solve(req: SolveRequest):
     if not ai_client:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY server environment mein set nahi hai.")
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
 
     system_instruction = """
-    Aap ek adhyapak hain jo vigyan aur ganit ke kathin prashnon ko step-by-step visual roop mein samjhate hain.
+    Aap ek adhyapak hain jo prashnon ko step-by-step whiteboard video roop me samjhate hain.
     Nirdesh:
-    1. Bhasha: Shuddh Hindi (Sanskrit mool). Urdu, Arabic ya Angrezi shabdon ka prayog na karein (sawal -> prashn, answer -> uttar, formula -> sutra).
-    2. Har step ko JSON array ke roop mein dein.
-    3. Output format:
-    [
-      {
-        "step_no": 1,
-        "title": "Charan ka shirshak",
-        "narration": "Adhyapak dwara bola jane wala shuddh Hindi vakya.",
-        "canvas_command": {
-          "type": "triangle",
-          "points": [[100, 300], [300, 300], [100, 150]],
-          "labels": ["A", "B", "C"]
+    1. Bhasha: Shuddh Hindi (Devanagari). Urdu ya Persian shabdon se bachein (prashn, uttar, sutra, charan).
+    2. Ganit ke sanketon ko bolne ke liye shabdon me likhein (= ko barabar, + ko jama).
+    3. Output KEWAL valid JSON hona chahiye:
+    {
+      "scenes": [
+        {
+          "title": "Charan ka shirshak",
+          "board": ["Board par likhi jane wali 2-3 lines", "Sutra ya sankhya"],
+          "say": "Adhyapak dwara bola jane wala shuddh aur aakarshak vakya.",
+          "emoji": "✏️",
+          "svg": "<svg viewBox='0 0 300 160' xmlns='http://www.w3.org/2000/svg'><polygon points='50,130 220,130 50,40' fill='none' stroke='#ffd36b' stroke-width='3'/></svg>"
         }
-      }
-    ]
-    Kewal valid JSON return karein, koi extra text nahi.
+      ]
+    }
     """
+
+    contents = []
+    if req.image_base64:
+        image_bytes = base64.b64decode(req.image_base64.split(",")[-1])
+        contents.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
+    
+    user_text = req.prompt if req.prompt else "Is tasveer me diye gaye prashn ko hal karein aur board par samjhayein."
+    contents.append(user_text)
 
     try:
         response = ai_client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=req.prompt,
+            contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 response_mime_type="application/json"
             )
         )
-        steps = json.loads(response.text)
+        data = json.loads(response.text)
+        scenes = data.get("scenes", [])
 
-        for step in steps:
-            audio_b64 = await generate_audio_base64(step["narration"], req.voice_name)
-            step["audio_base64"] = audio_b64
+        # Har scene ke liye Indian Neural Voice banana
+        for scene in scenes:
+            scene["audio_base64"] = await text_to_speech_base64(scene["say"], req.voice_name)
 
-        return {"status": "success", "steps": steps}
-
+        return {"status": "success", "scenes": scenes}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
-def health_check():
-    return {"status": "GyaanLens Engine Running"}
+def ping():
+    return {"status": "GyaanLens Engine Live"}
