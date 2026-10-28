@@ -1,6 +1,7 @@
 import os, json, base64
 import edge_tts, httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -8,13 +9,12 @@ from google import genai
 from google.genai import types
 
 app = FastAPI()
-from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 VOICE = os.getenv("VOICE", "hi-IN-SwaraNeural")
-DID = os.getenv("DID_API_KEY")          # optional: real teacher video
-TEACHER = os.getenv("TEACHER_IMAGE_URL")  # optional: teacher photo URL (apni/licensed)
+DID = os.getenv("DID_API_KEY")
+TEACHER = os.getenv("TEACHER_IMAGE_URL")
 
 SYSTEM = """तुम एक अनुभवी भारतीय शिक्षक हो। छात्र का प्रश्न (पाठ या फोटो) चरण-दर-चरण समझाओ।
 केवल JSON लौटाओ: {"title":str,"scenes":[{"heading":str,"say":str,"lines":[str],"formula":str}]}
@@ -67,7 +67,6 @@ def config():
     local = os.path.exists("static/teacher.jpg")
     return {"avatar": bool(DID and TEACHER), "teacher": TEACHER or ("/teacher.jpg" if local else None)}
 
-# --- Optional real-teacher video (D-ID). Endpoint/fields D-ID docs se ek bar verify kar lena ---
 @app.post("/api/avatar")
 async def avatar(s: Say):
     if not (DID and TEACHER):
@@ -88,4 +87,5 @@ async def avatar_status(tid: str):
     j = r.json()
     return {"status": j.get("status"), "url": j.get("result_url")}
 
+os.makedirs("static", exist_ok=True)
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
