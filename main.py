@@ -93,4 +93,9 @@ async def avatar_status(tid: str):
     j = r.json()
     return {"status": j.get("status"), "url": j.get("result_url")}
 
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+@app.get("/")
+def root():
+    return {"status": "GyaanLens Engine Live"}
+
+if os.path.isdir("static"):
+    app.mount("/", StaticFiles(directory="static"), name="static")
