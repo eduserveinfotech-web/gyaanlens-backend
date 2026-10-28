@@ -8,6 +8,8 @@ from google import genai
 from google.genai import types
 
 app = FastAPI()
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 VOICE = os.getenv("VOICE", "hi-IN-SwaraNeural")
@@ -62,7 +64,8 @@ async def tts(s: Say):
 
 @app.get("/api/config")
 def config():
-    return {"avatar": bool(DID and TEACHER)}
+    local = os.path.exists("static/teacher.jpg")
+    return {"avatar": bool(DID and TEACHER), "teacher": TEACHER or ("/teacher.jpg" if local else None)}
 
 # --- Optional real-teacher video (D-ID). Endpoint/fields D-ID docs se ek bar verify kar lena ---
 @app.post("/api/avatar")
