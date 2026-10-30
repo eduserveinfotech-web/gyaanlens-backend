@@ -75,7 +75,7 @@ async def tts(s: Say):
 @app.get("/api/config")
 def config():
     local = os.path.exists("static/teacher.jpg")
-    return {"avatar": bool(DID and TEACHER), "teacher": TEACHER or ("/teacher.jpg" if local else None)}
+    return {"v": 3, "avatar": bool(DID and TEACHER), "teacher": TEACHER or ("/teacher.jpg" if local else None)}
 
 # --- Optional real-teacher video (D-ID). Endpoint/fields D-ID docs se ek bar verify kar lena ---
 @app.post("/api/avatar")
